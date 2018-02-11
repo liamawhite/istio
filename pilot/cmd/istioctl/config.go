@@ -16,8 +16,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/api/core/v1"
@@ -45,23 +45,25 @@ Support for other environments to follow.
 `,
 		Example: `# Retrieve config for productpage-v1-bb8d5cbc7-k7qbm pod
 istioctl proxy-config productpage-v1-bb8d5cbc7-k7qbm`,
-		Aliases: []string{"pc"},
-		Args:    cobra.MinimumNArgs(1),
+		Aliases:          []string{"pc"},
+		Args:             cobra.MinimumNArgs(1),
+		PersistentPreRun: getRealKubeConfig,
 		RunE: func(c *cobra.Command, args []string) error {
 			podName := args[0]
 			log.Infof("Retrieving proxy config for %q", podName)
-
 			ns := namespace
 			if ns == v1.NamespaceAll {
-				ns = defaultNamespace
+				ns = getDefaultNamespace(kubeconfig)
 			}
-			config, err := readConfigFile(podName, ns)
-			if err != nil {
+
+			cmd := []string{"/usr/local/bin/pilot-agent", "local-config"}
+			if stdout, stderr, err := podExec(podName, ns, cmd); err != nil {
 				return err
+			} else if stderr.String() != "" {
+				return errors.New(stderr.String())
+			} else {
+				fmt.Println(stdout.String())
 			}
-
-			fmt.Println(config)
-
 			return nil
 		},
 	}
@@ -88,31 +90,6 @@ func defaultRestConfig() (*rest.Config, error) {
 	config.GroupVersion = &v1.SchemeGroupVersion
 	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
 	return config, nil
-}
-
-func readConfigFile(podName, podNamespace string) (string, error) {
-	// Get filename to read from
-	var fileLocation string
-	cmd := []string{"ls", "-Art", "/etc/istio/proxy"}
-	if stdout, stderr, err := podExec(podName, podNamespace, cmd); err != nil {
-		return "", err
-	} else if stderr.String() != "" {
-		return "", fmt.Errorf("unable to find config file: %v", stderr.String())
-	} else {
-		// Use the first file in the sorted ls
-		resp := strings.Fields(stdout.String())
-		fileLocation = fmt.Sprintf("/etc/istio/proxy/%v", resp[0])
-	}
-
-	// Cat the file
-	cmd = []string{"cat", fileLocation}
-	if stdout, stderr, err := podExec(podName, podNamespace, cmd); err != nil {
-		return "", err
-	} else if stderr.String() != "" {
-		return "", fmt.Errorf("unable to read config file: %v", stderr.String())
-	} else {
-		return stdout.String(), nil
-	}
 }
 
 func podExec(podName, podNamespace string, command []string) (*bytes.Buffer, *bytes.Buffer, error) {
