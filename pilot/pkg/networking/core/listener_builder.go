@@ -15,6 +15,7 @@
 package core
 
 import (
+	"strconv"
 	"time"
 
 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
@@ -266,10 +267,24 @@ func parseDuration(s string) *durationpb.Duration {
 		return nil
 	}
 	t, err := time.ParseDuration(s)
-	if err != nil {
+	if err != nil || t <= 0 {
+		// Invalid or non-positive duration
 		return nil
 	}
 	return durationpb.New(t)
+}
+
+func parseUint32(s string) *uint32 {
+	if s == "" {
+		return nil
+	}
+	val, err := strconv.ParseUint(s, 10, 32)
+	if err != nil || val == 0 {
+		// Invalid or zero value - maxRequestsPerConnection must be positive
+		return nil
+	}
+	result := uint32(val)
+	return &result
 }
 
 // TODO: This code is still insufficient. Ideally we should be parsing all the virtual services
@@ -359,6 +374,29 @@ func (lb *ListenerBuilder) buildHTTPConnectionManager(httpOpts *httpListenerOpts
 	if idleTimeout := parseDuration(lb.node.Metadata.IdleTimeout); idleTimeout != nil {
 		connectionManager.CommonHttpProtocolOptions = &core.HttpProtocolOptions{
 			IdleTimeout: idleTimeout,
+		}
+	}
+
+	// Apply gateway-specific common HTTP protocol options configurable via pod annotations
+	if lb.node.Type == model.Router && lb.node.Metadata.Annotations != nil {
+		var gatewayMaxConnectionDuration *durationpb.Duration
+		var gatewayMaxRequestsPerConnection *wrappers.UInt32Value
+
+		if maxConnDuration, exists := lb.node.Metadata.Annotations["gateway.istio.io/httpMaxConnectionDuration"]; exists {
+			gatewayMaxConnectionDuration = parseDuration(maxConnDuration)
+		}
+
+		if maxReqsPerConn, exists := lb.node.Metadata.Annotations["gateway.istio.io/httpMaxRequestsPerConnection"]; exists {
+			if parsed := parseUint32(maxReqsPerConn); parsed != nil {
+				gatewayMaxRequestsPerConnection = &wrappers.UInt32Value{Value: *parsed}
+			}
+		}
+		if gatewayMaxConnectionDuration != nil || gatewayMaxRequestsPerConnection != nil {
+			if connectionManager.CommonHttpProtocolOptions == nil {
+				connectionManager.CommonHttpProtocolOptions = &core.HttpProtocolOptions{}
+			}
+			connectionManager.CommonHttpProtocolOptions.MaxConnectionDuration = gatewayMaxConnectionDuration
+			connectionManager.CommonHttpProtocolOptions.MaxRequestsPerConnection = gatewayMaxRequestsPerConnection
 		}
 	}
 
